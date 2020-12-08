@@ -1,5 +1,6 @@
 # GithubPortfolio
 Michael Hickey
+
 Lead Data Scientist at The MITRE Corporation 
 and Candidate for ME in Data Analytics at the University of Wisconsin-Madison
 
