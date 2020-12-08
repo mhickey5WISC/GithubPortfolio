@@ -1,0 +1,927 @@
+---
+title: "MHickey Covid-19 Dashboard"
+output: html_document
+runtime: shiny
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1250px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+
+## Visualizing the Spread and Impact of Covid-19 in the United States
+
+This notebook represents a series of graphics that assess the impact of Covid-19
+at a global, national, regional, and state level in terms of reported PCR testing, cases, hospitalizations,
+and deaths. This is intended as a retrospective look at the data - *not* as a model to project future spread
+or impact of the virus.
+
+There are a number of data sources leveraged to create these graphics:
+
+- The Covid Tracking Project 
+  ("https://covidtracking.com/")
+  
+- US State population figures 
+  ("https://www.census.gov/data/tables/time-series/demo/popest/2010s-state-total.html#par_textimage_1574439295")
+  
+- John's Hopkins Global Covid Death Data
+  ("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/")
+  
+  
+Note that data quality has not been perfect, especially in the early months of the pandemic. Reports are
+aggregated from hundreds of municipalities, all of which have different practices. When interpreting the data, keep in mind the following:
+
+- Reported Covid-19 cases represent only a fraction of all infections
+- Reported deaths tend to lag the trends of other metrics by several weeks
+- No single metric provides a perfect representation of the situation
+
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width = 360)
+# print(getwd())
+```
+
+Load relevant packages:
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# Load libraries
+# Use `install.packages("package_name") if package has not yet been installed
+
+library(tidyverse) # For general data wrangling and cleaning
+library(shiny)     # For interactive visuals
+library(ggthemes)  # For preset graphic theme settings
+library(gganimate)
+library(zoo)
+library(grid)
+library(scales)
+library(lubridate) # For converting time values
+
+# For mapping data
+library(sf)                   
+library("rnaturalearth")
+library("rnaturalearthdata")
+library(rgeos)
+
+```
+
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+# Connect to APIs, and wrangle data
+
+# Read in data from The Covid Tracking Project
+# This dataset contains detailed daily data on PCR testing, 
+# hospitalizations, and deaths for each of the 50 US States plus the District
+# of Columbia.
+
+CovidData <- read_csv("https://covidtracking.com/api/v1/states/daily.csv") %>%
+  mutate(date = as.Date(as.character(date),format="%Y%m%d"),
+         NewPercentPositive = 100*positiveIncrease/(totalTestResultsIncrease)) %>%
+  filter(NewPercentPositive >= 0) %>%
+  transmute(date, state, totalTestResultsIncrease, positiveIncrease, negativeIncrease, 
+            hospitalizedCurrently, deathIncrease, death)
+
+bak <- CovidData
+
+Pop <- read_csv("Statepop.csv")
+
+CovidData <- left_join(CovidData,
+                       Pop,
+                       by = "state")
+
+# Map to region
+Region <- data.frame(state = c("AK", "HI", "WA", "OR", "CA", "NV", "ID", "MT", "WY", "UT", "AZ", "CO", "NM",
+                               "ND", "SD", "NE", "KS", "MN", "IA", "MO", "WI", "IL", "IN", "MI", "OH",
+                               "TX", "OK", "AR", "LA", "KY", "TN", "AL", "MS", "WV", "VA", "DC", "MD",
+                               "DE", "NC", "SC", "GA", "FL",
+                               "PA", "NJ", "NY", "CT", "MA", "VT", "NH", "ME", "RI"),
+                     region = c("West", "West", "West", "West", "West", "West", "West", "West", "West", "West", "West",
+                                "West", "West",
+                               "Midwest", "Midwest", "Midwest", "Midwest", "Midwest", "Midwest", "Midwest", "Midwest", 
+                               "Midwest", "Midwest", "Midwest", "Midwest",
+                               "South", "South", "South", "South", "South", "South", "South", "South", 
+                               "South", "South", "South", "South",
+                               "South", "South", "South", "South", "South",
+                               "Northeast", "Northeast", "Northeast", 
+                               "Northeast", "Northeast", "Northeast", "Northeast", "Northeast", "Northeast"))
+
+CovidData <-
+  left_join(CovidData,
+            Region,
+            by = "state") %>%
+  filter(!(is.na(region)))
+
+CovidData$region <- factor(CovidData$region, 
+                           levels = c("Northeast", "Midwest", "South", "West"))
+
+PlotBase <- ggplot(CovidData) +
+  theme_tufte() +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_color_brewer(palette = "Dark2") +
+  labs(caption = "Data Source: The Covid Tracking Project") +#\nPlot created by @KeepTheOutliers") +
+  theme(axis.text = element_text(size = 14, family = "serif"),
+        axis.title = element_text(size = 16, family = "serif"),
+        legend.title = element_text(size = 14, family = "serif"),
+        legend.position = "top",
+        plot.title = element_text(size = 18, family = "serif", hjust = 0.4),
+        plot.background = element_rect(fill = "#faf8f6"),
+        axis.ticks.y = element_blank(),
+        panel.ontop = TRUE,
+        panel.grid.major.y = element_line(color = "#faf8f6", size = 0.5),
+        panel.grid.minor.y =  element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        plot.caption = element_text(colour = "grey25", family = "serif", hjust = 0.5, size = 10)) +
+  scale_x_date(limits = c(as.Date("2020-03-01"), as.Date(Sys.Date()))+1,
+               date_breaks = "1 month", date_labels = "%b")
+
+# CovidData 
+```
+
+# Global Covid-19 Impact
+
+The figure below maps the reported Covid-19 deaths per capita across the world. The countries
+with the highest reported deaths per capita are in Europe and the Americas.
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width=12, fig.height = 8}
+
+# Pull in world population data by country
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Generate string of today's date
+Today <- paste0(substr(Sys.Date()-1, 6, 10), "-", substr(Sys.Date()-1, 1, 4))
+
+# Connect to API with John's Hopkins global Covid-19 death report data
+# raw <- read_csv(file = paste0("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/",
+#                               "csse_covid_19_data/csse_covid_19_daily_reports/",
+#                               Today, ".csv"))
+raw <- read_csv(file = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/12-06-2020.csv")
+
+raw %>%
+  mutate(Date = as_date(Last_Update)) %>%
+  group_by(Province_State, Date) %>%
+  summarize(DailyDeaths = sum(Deaths)) %>%
+  ungroup() -> CovidDataProvince
+
+raw %>%
+  mutate(Date = as_date(Last_Update),
+         Country_Region = ifelse(Country_Region == "US", "United States of America", Country_Region)) %>%
+  group_by(Country_Region, Date) %>%
+  summarize(DailyDeaths = sum(Deaths)) %>%
+  ungroup() -> CovidDataCountry
+
+
+MapData <-
+  left_join(world,
+            CovidDataProvince,
+            by = c("admin" = "Province_State")) %>%
+  filter(!(is.na(DailyDeaths))) %>%
+  rbind(left_join(world,
+                  CovidDataCountry,
+            by = c("sovereignt" = "Country_Region"))) %>%
+  mutate(DeathsperMillion = DailyDeaths/pop_est*100000)
+
+LatestDate <- max(CovidData$date)
+
+# Plot World
+ggplot(data = MapData) +
+    geom_sf(aes(fill = DeathsperMillion),
+            size = 1/4) +
+  coord_sf(crs = "+proj=moll") +
+  theme_map() +
+  labs(fill = "Reported Covid Deaths per Million Residents") +
+  # theme(legend.position = "bottom") +
+  labs(title = "Total Covid Deaths per Million",
+       subtitle = paste0("as of ", LatestDate)) +
+  theme(legend.text = element_text(family = "serif", size = 12, color = "grey25"),
+        legend.title = element_text(family = "serif", size = 14, color = "grey25"),
+        plot.title = element_text(family = "serif", size = 28, hjust = 0.5, color = "grey25"),
+        plot.subtitle = element_text(family = "serif", size = 14, hjust = 0.5, color = "grey25")) +
+  scale_fill_continuous(low = "#FFF4D9", high = "dark red",
+                        limits = c(0, 200), na.value="grey95") -> map
+
+map
+
+```
+
+```{r, echo = F, fig.width=12, fig.height=6}
+MapData %>%
+  as_data_frame() %>%
+  filter(pop_est > 1000000) -> BoxPlotData
+
+BoxPlotData$region_un <- factor(BoxPlotData$region_un,
+                                levels = c("Americas", "Europe", "Asia", "Africa", "Oceania"))
+
+arrow3 <-
+  tibble(
+    x1 = c("Africa"),
+    x2 = c("Africa"),
+    y1 = c(70),
+    y2 = c(10)
+  )
+
+
+ggplot(BoxPlotData) +
+  geom_boxplot(aes(x = region_un,
+                   y = DeathsperMillion,
+                   fill = region_un),
+               width = 1/4,
+               alpha = 1/3,
+               outlier.alpha = 0)  +
+  geom_jitter(aes(x = region_un,
+                 y = DeathsperMillion,
+                 color = region_un),
+               size = 1.2,
+              height = 0,
+              width = 1/5,
+              alpha = 2/4)  +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_color_brewer(palette = "Dark2") +
+  scale_y_continuous(limits = c(0, 125)) +
+  theme_tufte() +
+  labs(y = "Reported Covid-19 Deaths\nper Million",
+       x = "World Region",
+       title = "Europe and the Americas have\nReported the Highest Covid-19 Death Rates",
+       fill = "Region",
+       caption = "Data Source: The Covid Tracking Project") +#\nPlot created by @KeepTheOutliers") +
+  annotate("text", x = "Africa", y = 90,
+           family = "serif", size = 3.25, color = "grey25",
+           label = "Africa's low death totals\nmay owe to its relatively\nyoung population") +
+  geom_curve(data = arrow3,
+             aes(x = x1, y = y1, xend = x2, yend = y2),
+             size = 0.3, color = "gray45", curvature = 0.1) +
+  theme(axis.text.y = element_text(size = 12, family = "serif"),
+        axis.text.x = element_text(size = 12, family = "serif"),
+        axis.title.x = element_text(size = 16, family = "serif"),
+        axis.title.y = element_text(size = 16, family = "serif"),
+        legend.title = element_text(size = 10, family = "serif"),
+        legend.position = "top",
+        plot.title = element_text(size = 18, family = "serif", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, family = "serif", hjust = 0.5),
+        plot.background = element_rect(fill = "#faf8f6"),
+        strip.text = element_text(size = 10, family = "serif", color = "grey25"),
+        axis.ticks.y = element_blank(),
+        panel.grid.minor.y =  element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        plot.margin=unit(c(0.5,0.25,0.25,0.5),"cm"),
+        panel.spacing.y = unit(1, "lines"),
+        plot.caption = element_text(colour = "grey25", family = "serif", hjust = 0.5, size = 10)) +
+  guides(fill = F, color = F)
+```
+
+
+# National Overview of Reported PCR Covid-19 Testing
+
+The plot below shows all reported daily PCR tests in the United States since the
+beginning of the Covid-19 pandemic. Positive tests are shown in orange, while 
+negative tests are shown in green. The red line indicates the 7-day running average
+of the "Positive Test Rate," or the percentage of all tests that return a positive
+result.
+
+Some high-level takeaways: 
+
+- Testing capacity has increased continually since March
+
+- Differences in testing capacity over time obscure the true
+virus prevalence during different peaks
+
+- Positive rate is at its highest value since early May
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width=12, fig.height=6, dpi = 500}
+options(scipen = 1000000)
+
+arrowNatTest <- 
+  tibble(
+    x1 = c(as_date("2020-05-09")),
+    x2 = c(as_date("2020-04-27")),
+    y1 = c(1100000), 
+    y2 = c(1000000),
+    region = "Northeast"
+  )
+
+# Derive peak daily tests (rounded up to nearest 200,000 tests)
+UsPeak <- (((((CovidData %>%
+  filter(date == max(date)))$totalTestResultsIncrease %>% 
+    sum())/200000) %>% 
+  ceiling())*200000)
+
+PlotBase +
+  geom_bar(data = CovidData %>%
+             pivot_longer(cols = c(positiveIncrease, negativeIncrease),
+                          names_to = "Test Result",
+                          values_to = "Increase") %>%
+             mutate(`Test Result` = ifelse(`Test Result` == "positiveIncrease", "Positive", "Negative")),
+           aes(x = date, y = Increase, fill = `Test Result`),
+           stat = "identity", alpha = 1/2, width = 0.7) +
+  labs(y = "Daily New Tests\n",
+       x = "",
+       fill = "Test Result",
+       title = "Daily New Covid-19 Tests: United States") +
+  geom_line(data = CovidData %>%
+              filter(lubridate::as_date(date) > lubridate::as_date("2020-03-15")) %>%
+              group_by(date) %>% 
+              summarize(DailyPercentPositive = 100*sum(positiveIncrease)/sum(totalTestResultsIncrease)),
+            aes(x = date,
+                y = rollmean(DailyPercentPositive*UsPeak/25, 
+                             7, na.pad=TRUE, align = "right")),
+            color = "#a32d02",
+            size = 1.25,
+            alpha = 2/3) + 
+  annotate("text", x = as_date("2020-05-20"), y = 1220000,
+           family = "serif", size = 4.5, color = "#a32d02",
+           label = "Positive Test Rate (%)\n[7-Day Average]") +
+  geom_curve(data = arrowNatTest,
+             aes(x = x1, y = y1, xend = x2, yend = y2),
+             size = 0.4,
+             color = "grey25", curvature = -0.2) +
+  theme(axis.text.y.right = element_text(color = "#a32d02"),
+        axis.title.y.right = element_text(color = "#a32d02")) +
+  scale_y_continuous(label = comma,
+                     sec.axis = sec_axis( trans=~.*20/2000000, name=""),#Positive Rate (%)\n(7-Day Running Average)\n"),
+                     limits = c(0, UsPeak)) -> USTestPlot
+
+USTestPlot
+```
+
+
+Below is a plot of the same data, but grouped into four regions:
+
+- Northeast
+
+- Midwest
+
+- South
+
+- West
+
+We can see that the virus has spread has not been consistent across all regions, but that
+positive tests and positive rate are climbing in every region as we enter the winter season.
+
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width=12, fig.height=6, dpi=300}
+RegPeak <- ((((CovidData %>%
+  filter(date == max(date)) %>%
+  group_by(region) %>%
+  summarize(Peak = sum(totalTestResultsIncrease)))$Peak %>% max())/50000) %>%
+  ceiling())*50000
+# Regional Breakdown
+PlotBase +
+  geom_bar(data = CovidData %>%
+             pivot_longer(cols = c(positiveIncrease, negativeIncrease),
+                          names_to = "Test Result",
+                          values_to = "Increase") %>%
+             mutate(`Test Result` = ifelse(`Test Result` == "positiveIncrease", "Positive", "Negative")),
+           aes(x = date, y = Increase, fill = `Test Result`),
+           stat = "identity", alpha = 1/2, width = 0.99995) +
+  labs(y = "Daily New Tests\n",
+       x = "",
+       fill = "Test Result",
+       title = "Daily New Covid-19 Tests: United States") +
+  geom_path(data = CovidData %>%
+              filter(lubridate::as_date(date) > lubridate::as_date("2020-04-01")) %>%
+              ungroup() %>%
+              group_by(date, region) %>% 
+              summarize(DailyPercentPositive = 100*sum(positiveIncrease)/sum(totalTestResultsIncrease)) %>%
+              arrange(region, date),
+            aes(x = date,
+                y = rollmean(DailyPercentPositive*RegPeak/30, 
+                             7, na.pad=TRUE, align = "right"),
+                group = region),
+            color = "#a32d02",
+            size = 1/2,
+            alpha = 2/3) + 
+  scale_y_continuous(label = comma,
+                     sec.axis = sec_axis( trans=~.*30/600000, name="Positive Rate (%)\n(7-Day Running Average)\n"),
+                     limits = c(0, RegPeak)) +
+  theme(axis.text.y.right = element_text(color = "#a32d02", size = 12),
+        axis.title.y.right = element_text(color = "#a32d02", size = 12),
+        axis.text.x = element_text(angle = 90, size = 12),
+        panel.grid.major.y = element_line(size = 1/6),
+        panel.spacing = unit(1.5, "lines"),
+        strip.text = element_text(family = "serif", size = 12, color = "grey25")) +
+  facet_wrap(~region, nrow = 1, strip.position="top") +
+  guides(color = F) -> RegionTestPlot
+
+RegionTestPlot
+
+# ggsave(filename = "RegionTestPlot.png",
+#        plot = RegionTestPlot,
+#        device = "png",
+#        path = "/home/mhickey/Covid/")
+```
+
+
+# National Overview of Reported Hospitalizations due to Covid-19
+
+Hospitalization Data
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width=12, fig.height=6, dpi = 500}
+
+arrow <- 
+  tibble(
+    x1 = c(as_date("2020-06-28")),
+    x2 = c(as_date("2020-07-09")),
+    y1 = c(50000), 
+    y2 = c(48000),
+    region = "South"
+  )
+
+PlotBase +
+  geom_bar(aes(x = date, y = hospitalizedCurrently, fill = region),
+           stat = "identity", alpha = 1/2, width = 0.6) +
+  labs(x = "",
+       y = "Current Hospitalizations\ndue to Covid-19\n",
+       fill = "Region (per US Census)",
+       title = "Covid-19 Hospitalizations by Region\n") +
+  # geom_label(data = Annot,
+  #          aes(x = x, y = y, label = text),
+  #          family = "serif", size = 3) +
+  annotate("text", x = as_date("2020-06-12"), y = 50000,
+           family = "serif", size = 3.5, color = "gray25",
+           label = "Florida begins reporting \nhospitalization data") +
+  geom_curve(data = arrow,
+             aes(x = x1, y = y1, xend = x2, yend = y2),
+             arrow = arrow(length = unit(0.07, "inch")), size = 0.4,
+             color = "gray45", curvature = -0.2) +
+  theme(legend.position = "bottom",
+        panel.grid.major.y = element_line(size = 1/3)) -> HospStackPlot
+
+# HospStackPlot
+
+
+PlotBase +
+  geom_bar(aes(x = date, y = hospitalizedCurrently, fill = ""),
+           stat = "identity", alpha = 1/2, width = 0.6) +
+  labs(x = "",
+       y = "Current Hospitalizations\ndue to Covid-19\n",
+       title = "US Covid-19 Hospitalizations are Higher than ever before\n") +
+  annotate("text", x = as_date("2020-06-12"), y = 50000,
+           family = "serif", size = 3.5, color = "gray25",
+           label = "Florida begins reporting \nhospitalization data") +
+  geom_curve(data = arrow,
+             aes(x = x1, y = y1, xend = x2, yend = y2),
+             arrow = arrow(length = unit(0.07, "inch")), size = 0.4,
+             color = "gray45", curvature = -0.2) +
+  # geom_label(data = Annot,
+  #          aes(x = x, y = y, label = text),
+  #          family = "serif", size = 3) +
+  guides(fill = F)+
+  theme(legend.position = "bottom",
+        panel.grid.major.y = element_line(size = 1/3)) -> HospStackPlot2
+
+HospStackPlot2
+
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width=12, fig.height=6, dpi = 300}
+arrow3 <- 
+  tibble(
+    x1 = c(as_date("2020-06-21")),
+    x2 = c(as_date("2020-07-08")),
+    y1 = c(26000), 
+    y2 = c(25000),
+    region = "South"
+  )
+
+text <- 
+  tibble(
+    x = as_date("2020-05-01"),
+    y = 26000,
+    label = "Florida begins\n reporting\nhospitalization\ndata",
+    region = "South"
+  )
+  
+
+PlotBase +
+  geom_bar(data = CovidData,
+           aes(x = date, y = hospitalizedCurrently, fill = region),
+           stat = "identity", alpha = 1, width = 1.1) +
+  labs(x = "",
+       y = "Current Hospitalizations\ndue to Covid-19\n",
+       fill = "Region (per US Census)",
+       title = "Hospitalizations Due to Covid-19 are Increasing across the US\n") +
+  # geom_label(data = Annot,
+  #          aes(x = x, y = y, label = text),
+  #          family = "serif", size = 3) +
+  # geom_text(data = text,
+  #           aes(x = x, y = y, label = label),
+  #           font = "serif", size = 3, color = "grey25") +
+  # geom_curve(data = arrow3, 
+  #            aes(x = x1, y = y1, xend = x2, yend = y2),
+  #            arrow = arrow(length = unit(0.07, "inch")), size = 0.4,
+  #            color = "gray45", curvature = -0.2) +
+  theme(legend.position = "bottom",
+        panel.grid.major.y = element_line(size = 1/5)) +
+  facet_wrap(~region, nrow = 1) +
+  guides(fill = F) +
+  scale_x_date(limits = c(as.Date("2020-03-01"), as.Date(Sys.Date()))+1,
+               date_breaks = "2 months", date_labels = "%b") +
+  theme(panel.spacing = unit(2.75, "lines"),
+        plot.margin=unit(c(0.4,1,0.4,1.2),"cm"),
+        axis.text.x = element_text(angle = 90, size = 12)) -> HospFacetPlot
+
+HospFacetPlot
+
+
+# ggsave(filename = "HospFacetPlot.png",
+#        plot = HospFacetPlot,
+#        device = "png",
+#        path = "/home/mhickey/Covid/")
+
+```
+
+
+View Hospitalization Data by US State
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width = 12, fig.height= 6, dpi = 600}
+
+options(scipen = 999)
+
+HospPerCapita <- bak %>%
+  filter(!(state %in% c("AS", "MP", "PR"))) %>%
+  left_join(Pop,
+            by = "state") %>%
+  filter(!is.na(Pop)) %>%
+  rowwise() %>%
+  mutate(HospPerCapita = hospitalizedCurrently/Pop) %>%
+  ungroup() %>%
+  filter(!is.na(HospPerCapita)) %>%
+  filter(HospPerCapita > 0) %>%
+  left_join(Region,
+            by = "state") %>%
+  group_by(state)
+
+Current <- HospPerCapita %>%
+  group_by(state) %>%
+  mutate(maxH = max(hospitalizedCurrently/Pop)) %>%
+  filter(date == max(date)) %>%
+  ungroup()
+
+
+OrderH <- HospPerCapita %>%
+  group_by(state) %>%
+  filter(date == max(date)) %>%
+  ungroup() %>%
+  arrange(-HospPerCapita) %>%
+  transmute(state) %>%
+  unique()
+
+HospPerCapita$state <- factor(HospPerCapita$state, 
+                               levels = OrderH$state)
+Current$state <- factor(Current$state, 
+                        levels = OrderH$state)
+
+ggplot() +
+  # scale_color_brewer(palette = "Dark2") +
+  # scale_color_manual(values = c("#a32d02")) +
+  facet_wrap(~state, nrow = 3, strip.position="bottom") +
+  # scale_y_log10() +
+  scale_y_continuous(breaks = c(0, 200, 400, 600, 800, 1000, 1200)) +
+  coord_cartesian(ylim = c(0, 1201)) +
+  scale_x_date(limits = c(as.Date("2020-02-20"), Sys.Date()+3),
+               breaks = seq(lubridate::as_date("2020-03-01"), lubridate::as_date(Sys.Date()+3), 62),
+               date_labels = "%b") +
+  theme_tufte() +
+  labs(y = "Hospitalizations\nper Million\n",
+       x = "",
+       title = "Covid-19 Hospitalizations are Rising in nearly every US State",
+       subtitle = "By US State",
+       fill = "Region",
+       caption = "Data Source: The Covid Tracking Project") +#\nPlot created by @KeepTheOutliers") +
+  theme(axis.text.y = element_text(size = 12, family = "serif"),
+        axis.text.x = element_text(size = 8, family = "serif", angle = 90),
+        axis.title.x = element_text(size = 16, family = "serif"),
+        axis.title.y = element_text(size = 16, family = "serif"),
+        legend.title = element_text(size = 10, family = "serif"),
+        legend.position = "top",
+        plot.title = element_text(size = 18, family = "serif", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, family = "serif", hjust = 0.5),
+        plot.background = element_rect(fill = "#faf8f6"),
+        strip.text = element_text(size = 10, family = "serif", color = "grey25"),
+        axis.ticks.y = element_blank(),
+        panel.grid.minor.y =  element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        plot.margin=unit(c(0.5,0.25,0.25,0.5),"cm"),
+        panel.spacing.y = unit(1, "lines"),
+        plot.caption = element_text(colour = "grey25", family = "serif", hjust = 0.5, size = 10)) -> HospPerCapitaPlot
+
+topstate <- OrderH$state[1]
+
+HospPerCapitaPlot +
+  geom_bar(data = HospPerCapita,
+              aes(x = date,
+                  y = HospPerCapita*1000000,
+                  fill = region),
+           width = 1.5,
+           alpha = 3/3,
+           stat = "identity"
+              # color = "#a32d02",
+              ) +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_y_continuous(breaks = c(0:3)*400) +
+  # scale_y_log10(limits = c(0.1, 100)) +
+  scale_x_date(limits = c(as.Date("2020-03-01"), as.Date(Sys.Date())+1),
+               date_breaks = "3 months", date_labels = "%b") -> HospPlot
+
+
+unique(HospPerCapita$state) %>% length
+```
+
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, dpi = 500, fig.width=12, fig.height=6}
+
+# Define UI for app that draws a histogram ----
+ui <- fluidPage(
+
+  # App title ----
+  # titlePanel("Hello Shiny!"),
+
+  # Sidebar layout with input and output definitions ----
+  sidebarLayout(
+
+    # Sidebar panel for inputs ----
+     selectInput("state", "State:",
+                 c("All US States", as.character(unique(HospPerCapita$state)) %>% sort()),
+                 tableOutput("data")),
+    # Main panel for displaying outputs ----
+    mainPanel(
+
+      # Output: Histogram ----
+      plotOutput(outputId = "distPlot")
+
+    )
+  )
+)
+# Define server logic required to draw a histogram ----
+server <- function(input, output) {
+
+  # Histogram of the Old Faithful Geyser Data ----
+  # with requested number of bins
+  # This expression that generates a histogram is wrapped in a call
+  # to renderPlot to indicate that:
+  #
+  # 1. It is "reactive" and therefore should be automatically
+  #    re-executed when inputs (input$bins) change
+  # 2. Its output type is a plot
+  output$distPlot <- renderPlot({
+
+    if(input$state == "All US States") {
+      HospPlot
+    } else{
+
+    HospPerCapitaPlot +
+    geom_bar(data = HospPerCapita %>% filter(state == input$state),
+              aes(x = date,
+                  y = HospPerCapita*1000000,
+                  fill = region),
+           alpha = 3,
+           width = 2.5,
+           stat = "identity"
+              # color = "#a32d02",
+              ) +
+      labs(subtitle = paste0("State: ", input$state)) +
+        theme(axis.text.x = element_text(size = 18, angle = 0),
+              axis.text.y = element_text(size = 18, angle = 0),
+              axis.title = element_text(size = 24, angle = 0)) +
+      scale_fill_brewer(palette = "Dark2") +
+      scale_x_date(limits = c(as.Date("2020-03-01"), as.Date(Sys.Date())+1),
+                   date_breaks = "3 months", date_labels = "%b") +
+        guides(fill = F)
+    }
+      },
+    width = 1200, height = 600,
+    res = 100
+    )
+
+}
+
+shinyApp(ui, server, options = list(height = 1000))
+```
+
+
+# National Overview of Reported Deaths due to Covid-19
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width=12, fig.height=6, dpi = 500}
+
+
+arrow2 <- 
+  tibble(
+    x1 = c(as_date("2020-05-27")),
+    x2 = c(as_date("2020-05-24")),
+    y1 = c(1500), 
+    y2 = c(1200)
+  )
+
+
+PlotBase +
+  geom_bar(data = CovidData %>% filter(deathIncrease >= 0),
+           aes(x = date, y = deathIncrease, fill = region),
+           stat = "identity", alpha = 1/2, width = 0.7, ) +
+  labs(x = "",
+       y = "Daily Deaths\ndue to Covid-19\n",
+       fill = "Region (per US Census)",
+       title = "Covid-19 Deaths by Region\n") +
+  annotate("text", x = as_date("2020-06-10"), y = 1600,
+           family = "serif", size = 3.5, color = "#a32d02",
+           label = "7-Day Running Average \nUS Daily Deaths") +
+  geom_curve(data = arrow2, 
+             aes(x = x1, y = y1, xend = x2, yend = y2),
+             size = 0.3, color = "gray45", curvature = 0.1) +
+  theme(legend.position = "bottom",
+        panel.grid.major.y = element_line(size = 1/3)) +
+  # scale_y_continuous(limits = c(0, 3000))   +
+  # coord_cartesian(ylim = c(0, 3000)) +
+  geom_path(data = CovidData  %>% group_by(date) %>% summarize(NewDeaths = sum(deathIncrease)),
+            aes(x = date,
+                y = rollmean(NewDeaths, 7, na.pad=TRUE, align = "right")),
+            color = "#a32d02",
+            size = 0.75,
+            alpha = 2/3) -> DeathStackPlot
+
+DeathStackPlot
+
+# ggsave(filename = "DeathStackPlot.png",
+#        plot = DeathStackPlot,
+#        device = "png",
+#        path = "/home/mhickey/Covid/")
+
+# ggplotly(width = 750, height = 450)
+```
+
+
+
+New Deaths
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width = 12, fig.height= 6, dpi = 300}
+
+options(scipen = 999)
+
+Pop <- read_csv("Statepop.csv")
+
+DeathPerCapita <- bak %>%
+  filter(!(state %in% c("AS", "MP", "PR"))) %>%
+  left_join(Pop,
+            by = "state") %>%
+  filter(!is.na(Pop)) %>%
+  mutate(NewDeathPerCapita = deathIncrease/Pop) %>%
+  filter(!is.na(NewDeathPerCapita)) %>%
+  filter(NewDeathPerCapita > 0)
+
+
+
+Order <- DeathPerCapita %>%
+  group_by(state) %>%
+  filter(death/Pop == max(death/Pop)) %>%
+  ungroup() %>%
+  arrange(-death/Pop) %>%
+  transmute(state) %>%
+  unique()
+
+DeathPerCapita$state <- factor(DeathPerCapita$state, 
+                               levels = Order$state)
+
+ggplot() +
+  # scale_color_brewer(palette = "Dark2") +
+  scale_color_manual(values = c("#a32d02")) +
+  facet_wrap(~state, nrow = 3, strip.position="bottom") +
+  # scale_y_log10() +
+  scale_y_continuous(breaks = c(0, 10, 20, 30, 40)) +
+  coord_cartesian(ylim = c(0, 41)) +
+  scale_x_date(limits = c(as.Date("2020-02-20"), Sys.Date()+3),
+               breaks = seq(lubridate::as_date("2020-03-01"), lubridate::as_date(Sys.Date()+3), 62),
+               date_labels = "%b") +
+  theme_tufte() +
+  labs(y = "Daily New Deaths\nper Million\n",
+       x = "",
+       fill = "Test Result",
+       title = "Death Rates are Reaching new Highs in many US States",
+       color = "Trendline (GAM)",
+       caption = "Data Source: The Covid Tracking Project\nPlot created by @KeepTheOutliers") +
+  theme(axis.text.y = element_text(size = 12, family = "serif"),
+        axis.text.x = element_text(size = 8, family = "serif", angle = 90),
+        axis.title = element_text(size = 16, family = "serif"),
+        legend.title = element_text(size = 10, family = "serif", angle = 0),
+        legend.position = "top",
+        plot.title = element_text(size = 18, family = "serif", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, family = "serif", hjust = 0.5),
+        plot.background = element_rect(fill = "#faf8f6"),
+        axis.ticks.y = element_blank(),
+        panel.grid.minor.y =  element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        plot.margin=unit(c(0.5,0.25,0.25,0.5),"cm"),
+        panel.spacing.y = unit(1, "lines"),
+        plot.caption = element_text(colour = "grey25", family = "serif", hjust = 0.5, size = 10)) -> DeathPerCapitaPlot
+
+DeathPerCapitaPlot +
+  geom_point(data = DeathPerCapita,
+            aes(x = date, 
+                y = NewDeathPerCapita*1000000),
+            size = 1/6, 
+            alpha = 1/3,
+            color = "grey25") +
+  geom_smooth(data = DeathPerCapita,
+              aes(x = date,
+                  y = NewDeathPerCapita*1000000,
+                  color = ""),
+              method = "gam",
+              alpha = 0,
+              # color = "#a32d02",
+              size = 1/2,
+              na.rm = T
+              )  +
+  # scale_y_log10(limits = c(0.1, 100)) +
+  scale_x_date(limits = c(as.Date("2020-03-01"), as.Date(Sys.Date()))+1,
+               date_breaks = "2 months", date_labels = "%b") -> DeathAllPlot
+
+
+# unique(DeathPerCapita$state) %>% length
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, dpi = 500, fig.width=12, fig.height=6}
+#, fig.width=12, fig.height=8, dpi = 300}
+# Define UI for app that draws a histogram ----
+ui1 <- fluidPage(
+
+  # App title ----
+  # titlePanel("Hello Shiny!"),
+
+  # Sidebar layout with input and output definitions ----
+  sidebarLayout(
+
+    # Sidebar panel for inputs ----
+     selectInput("state", "State:",
+                 c("All US States", as.character(unique(DeathPerCapita$state)) %>% sort()),
+                 tableOutput("data")),
+    # Main panel for displaying outputs ----
+    mainPanel(
+
+      # Output: Histogram ----
+      plotOutput(outputId = "distPlot")
+
+    )
+  )
+)
+# Define server logic required to draw a histogram ----
+server1 <- function(input, output) {
+
+  # Histogram of the Old Faithful Geyser Data ----
+  # with requested number of bins
+  # This expression that generates a histogram is wrapped in a call
+  # to renderPlot to indicate that:
+  #
+  # 1. It is "reactive" and therefore should be automatically
+  #    re-executed when inputs (input$bins) change
+  # 2. Its output type is a plot
+  output$distPlot <- renderPlot({
+
+    if(input$state == "All US States") {
+      DeathAllPlot
+    } else{
+
+      StateDeath <- DeathPerCapita %>%
+        filter(state == input$state)
+
+      DeathPerCapitaPlot  +
+        geom_point(data = StateDeath,
+                   aes(x = date,
+                       y = NewDeathPerCapita*1000000),
+                   size = 1,
+                   alpha = 1/3,
+                   color = "grey25") +
+        geom_smooth(data = StateDeath,
+                    aes(x = date,
+                        y = NewDeathPerCapita*1000000,
+                        color = ""),
+                    method = "gam",
+                    alpha = 0,
+                    # color = "#a32d02",
+                    size = 1.5, alpha = 4/5,
+                    na.rm = T
+              )  +
+        guides(color = F) +
+  coord_cartesian(ylim = c(0, 41)) +
+        # scale_y_log10(limits = c(0.1, 100)) +
+        scale_x_date(limits = c(as.Date("2020-03-01"), as.Date(Sys.Date()))+1,
+                     date_breaks = "2 months", date_labels = "%b") +
+        theme(axis.text.x = element_text(size = 18, angle = 0),
+              axis.text.y = element_text(size = 18, angle = 0),
+              axis.title = element_text(size = 24, angle = 0)) +
+        labs(subtitle = paste0("State: ", input$state))
+    }
+      },
+    width = 1200, height = 600,
+    res = 100
+    )
+
+}
+
+shinyApp(ui1, server1, options = list(height = 1000))
+```
+
+
+
+
+
+
