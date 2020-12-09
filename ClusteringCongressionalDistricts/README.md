@@ -1,4 +1,4 @@
-This project was part of a final group project for a grad school class at University of Wisconsin-Madison. THe class was ECE532 (Matrix Methods for Machine Learning). While I coded the majority of the .ipynb file, including the entirety of Section 4, this project was a team effort.
+This project was my contribution of an open ended final project for a Machine Learning grad school class at University of Wisconsin-Madison.
 
 The objective of this analysis is to explore how different clustering methods could be appllied to automatically determine Congressional boundaries in the state of Wisconsin. The drawing of Congressional boundaries is notoriously influenced by partison bias. Unsupervised machine learning methods such as K-means, and Meanshift clustering could be applied to weighted Census tract data in order to automate this process, and potentially eliminate human influence.
 
