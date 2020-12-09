@@ -1,4 +1,4 @@
-This is a personal project intended to visualize the impact of Covid-19 globally and nationally.
+This is a personal data science project intended to visualize the impact of Covid-19 globally and nationally.
 
 The code included in the repo generates an interactive ShinyR dashboard that can be accessed at:
 
