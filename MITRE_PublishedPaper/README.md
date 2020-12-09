@@ -1,5 +1,4 @@
 # Hybrid Queuing-Regression Model Application for Airspace Analysis
-Jonathon Hoffman
 Michael Hickey
 
 I  was the lead author on this paper that was submitted and published by IEEE as part of the 2019 Integrated Communications, Navigation, and Surveillance Conference. The paper was awarded second place in its track. 
